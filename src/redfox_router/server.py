@@ -1,20 +1,44 @@
 """FastAPI app: OpenAI-compatible router surface + a small status/dashboard API."""
 from __future__ import annotations
 
+import hmac
+import os
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.security import APIKeyHeader
 from starlette.concurrency import run_in_threadpool
 
 from . import engine
 from .config import BACKENDS, LOGICAL_MODELS
 from .store import RouterStore
 
+# Simple local auth via API key (env var REDFOX_ROUTER_API_KEY)
+# If not set, auth is disabled (localhost-only dev mode)
+ROUTER_API_KEY = os.environ.get("REDFOX_ROUTER_API_KEY")
+api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+
+async def verify_api_key(authorization: str = Security(api_key_header)):
+    if not ROUTER_API_KEY:
+        return  # Auth disabled
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    # Support "Bearer <key>" or just "<key>"
+    provided = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(provided, ROUTER_API_KEY):
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+
 app = FastAPI(title="RedFox Router", version="0.1.0")
 store = RouterStore()
 _DASHBOARD = Path(__file__).resolve().parent / "dashboard.html"
+
+# Apply auth to all /v1/* routes; /health, /api/status, / remain open
+from fastapi import Depends
+_v1_routes_dep = Depends(verify_api_key)
 
 
 @app.get("/health")
@@ -26,7 +50,7 @@ def health() -> dict:
     }
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(verify_api_key)])
 def models() -> dict:
     return {
         "object": "list",
@@ -39,7 +63,7 @@ def models() -> dict:
     }
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
 async def chat_completions(req: Request):
     try:
         payload = await req.json()

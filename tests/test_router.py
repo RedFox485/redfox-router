@@ -118,3 +118,108 @@ def test_model_list_matches_config():
     data = server.models()["data"]
     ids = {m["id"] for m in data}
     assert ids == set(LOGICAL_MODELS.keys())
+
+
+# ── Auth tests ──
+def test_auth_disabled_by_default(monkeypatch):
+    """When REDFOX_ROUTER_API_KEY is not set, /v1/* routes work without auth."""
+    monkeypatch.delenv("REDFOX_ROUTER_API_KEY", raising=False)
+    from redfox_router import server
+    from fastapi.testclient import TestClient
+    client = TestClient(server.app)
+    # Health should work without auth
+    r = client.get("/health")
+    assert r.status_code == 200
+    # Models should work without auth when disabled
+    r = client.get("/v1/models")
+    assert r.status_code == 200
+
+
+def test_auth_required_when_key_set(monkeypatch):
+    """When REDFOX_ROUTER_API_KEY is set, /v1/* routes require valid Bearer token."""
+    monkeypatch.setenv("REDFOX_ROUTER_API_KEY", "test-secret-123")
+    # Need to reimport to pick up the new env var
+    import importlib
+    import redfox_router.server as server_module
+    importlib.reload(server_module)
+    from fastapi.testclient import TestClient
+    client = TestClient(server_module.app)
+    # No auth -> 401
+    r = client.get("/v1/models")
+    assert r.status_code == 401
+    # Wrong key -> 403
+    r = client.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 403
+    # Correct key -> 200
+    r = client.get("/v1/models", headers={"Authorization": "Bearer test-secret-123"})
+    assert r.status_code == 200
+    # Also works without "Bearer " prefix
+    r = client.get("/v1/models", headers={"Authorization": "test-secret-123"})
+    assert r.status_code == 200
+
+
+# ── Streaming test ──
+def test_stream_chat_basic(store, monkeypatch):
+    """Test streaming path returns SSE chunks and records first-byte event."""
+    chunks = [
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+        b'data: [DONE]\n\n',
+    ]
+
+    class MockResponse:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {}
+            self._chunks = iter(chunks)
+
+        def iter_bytes(self):
+            return self._chunks
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    class MockClient:
+        def __init__(self):
+            self._response = MockResponse()
+
+        def stream(self, method, url, headers, json):
+            return self._response
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        def close(self):
+            pass
+
+    # Mock the client.stream call
+    import redfox_router.engine as engine_module
+
+    def mock_client(timeout):
+        return MockClient()
+
+    monkeypatch.setattr(engine_module, "_client", mock_client)
+
+    # Call stream_chat (it's a sync generator)
+    results = list(engine_module.stream_chat(
+        "deepseek-flash-v41-free",
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True},
+        store
+    ))
+
+    assert len(results) == 3
+    assert b"Hello" in results[0]
+    assert b"world" in results[1]
+    assert b"[DONE]" in results[2]
+
+    # Verify event was recorded
+    events = store.recent_events(5)
+    assert len(events) >= 1
+    assert events[0]["http_status"] == 200
+    assert events[0]["failure_class"] == "ok"
