@@ -101,6 +101,15 @@ def chat(logical_id: str, payload: dict, store: RouterStore,
             store.record_success(backend.id)
             if backend.exposes_headers:
                 store.record_snapshot(backend.id, dict(r.headers))
+            # BeatAPI returns quota in the response body: usage.quota.percent, reset_at, etc.
+            if backend.id == "beatapi":
+                try:
+                    payload_out = r.json()
+                    quota = payload_out.get("usage", {}).get("quota")
+                    if quota:
+                        store.record_snapshot(backend.id, {"x-beatapi-quota": str(quota)}, source="body")
+                except Exception:
+                    pass
             try:
                 payload_out = r.json()
             except Exception:
