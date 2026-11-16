@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RedFox Router</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background:#111; color:#e8e8e8; }
+  header { padding: 14px 20px; border-bottom:1px solid #262626; display:flex; justify-content:space-between; align-items:center; }
+  h1 { font-size: 15px; margin: 0; letter-spacing:.5px; }
+  .muted { color:#8a8a8a; }
+  main { padding: 18px 20px; max-width: 1000px; }
+  table { width:100%; border-collapse: collapse; margin: 8px 0 22px; }
+  th, td { text-align:left; padding:7px 9px; border-bottom:1px solid #222; vertical-align:top; }
+  th { color:#9aa; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; }
+  .healthy { background:#123d20; color:#6f6; }
+  .cooldown { background:#3d3412; color:#ee6; }
+  .down { background:#3d1212; color:#f88; }
+  .ok { color:#6f6; } .bad { color:#f88; }
+  code { background:#1c1c1c; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RedFox Router</h1>
+  <span class="muted" id="meta">loading…</span>
+</header>
+<main>
+  <h2 style="font-size:13px;color:#9aa;text-transform:uppercase">Backends</h2>
+  <table id="backends"><thead><tr>
+    <th>Backend</th><th>State</th><th>Cooldown</th><th>Quota (reported)</th><th>Last ok / error</th><th>Notes</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2 style="font-size:13px;color:#9aa;text-transform:uppercase">Recent incidents</h2>
+  <table id="incidents"><thead><tr>
+    <th>When</th><th>Backend</th><th>Class</th><th>Summary</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2 style="font-size:13px;color:#9aa;text-transform:uppercase">Recent requests</h2>
+  <table id="events"><thead><tr>
+    <th>When</th><th>Logical model</th><th>Backend</th><th>Status</th><th>Class</th><th>ms</th>
+  </tr></thead><tbody></tbody></table>
+</main>
+<script>
+function ago(t){ if(!t) return "—"; const s=Math.max(0,(Date.now()/1000)-t); if(s<60) return Math.round(s)+"s"; if(s<3600) return Math.round(s/60)+"m"; return Math.round(s/3600)+"h"; }
+function esc(x){ return String(x==null?"":x).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function quotaCell(b){
+  const q=b.quota;
+  if(!q) return '<span class="muted">unknown (no headers)</span>';
+  const parts=[];
+  if(q.rpd_remaining!=null) parts.push("day "+q.rpd_remaining+"/"+(q.rpd_limit??"?"));
+  if(q.rpm_remaining!=null) parts.push("min "+q.rpm_remaining+"/"+(q.rpm_limit??"?"));
+  if(q.rpd_reset_s!=null) parts.push("resets "+Math.round(q.rpd_reset_s/60)+"m");
+  return esc(parts.join(" · "))+' <span class="muted">('+esc(q.confidence)+')</span>';
+}
+async function refresh(){
+  try{
+    const r=await fetch("/api/status",{cache:"no-store"}); const d=await r.json();
+    document.getElementById("meta").textContent =
+      `${d.counts.events} requests · ${d.counts.failures} failures · ${new Date().toLocaleTimeString()}`;
+    document.querySelector("#backends tbody").innerHTML = d.backends.map(b=>`
+      <tr><td><code>${esc(b.id)}</code><div class="muted">${esc(b.name)}</div></td>
+      <td><span class="pill ${esc(b.state)}">${esc(b.state)}</span>${b.has_key?"":'<div class="muted">no key</div>'}</td>
+      <td>${b.cooldown_s_left>0?esc(b.cooldown_s_left)+"s":"—"}</td>
+      <td>${quotaCell(b)}</td>
+      <td>${b.last_ok_at?'<span class="ok">ok '+ago(b.last_ok_at)+'</span>':'—'}
+          ${b.last_error_at?'<div class="bad">'+esc(b.last_failure_class)+' '+ago(b.last_error_at)+'</div>':''}</td>
+      <td class="muted">${esc(b.notes)}</td></tr>`).join("");
+    document.querySelector("#incidents tbody").innerHTML = (d.incidents||[]).map(i=>`
+      <tr><td>${ago(i.opened_at)}</td><td>${esc(i.backend_id)}</td><td>${esc(i.failure_class)}</td><td class="muted">${esc(i.summary)}</td></tr>`).join("")
+      || '<tr><td colspan="4" class="muted">none</td></tr>';
+    document.querySelector("#events tbody").innerHTML = (d.recent_events||[]).map(e=>`
+      <tr><td>${ago(e.ts)}</td><td>${esc(e.logical_model)}</td><td>${esc(e.backend_id)}</td>
+      <td class="${e.failure_class==='ok'?'ok':'bad'}">${esc(e.http_status??"—")}</td>
+      <td>${esc(e.failure_class)}</td><td>${esc(e.latency_ms)}</td></tr>`).join("")
+      || '<tr><td colspan="6" class="muted">none</td></tr>';
+  }catch(err){ document.getElementById("meta").textContent = "fetch failed: "+err; }
+}
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>
